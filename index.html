@@ -1718,24 +1718,22 @@
         s && s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s;
 
       /* — record center label (canvas → texture) — */
-      function makeLabel(album, size = 512) {
-        const c = cnv(size, size),
-          x = c.getContext("2d"),
-          m = size / 2;
-        x.fillStyle = album.label;
-        x.beginPath();
-        x.arc(m, m, m, 0, 7);
-        x.fill();
-        // paper texture
-        grain(x, 16, 1800);
+      // rings + pressed lettering shared by both label looks
+      function labelFurniture(x, size, album, o) {
+        const m = size / 2;
+        x.save();
+        if (o.shadow) {
+          x.shadowColor = "rgba(0,0,0,0.7)";
+          x.shadowBlur = size * 0.014;
+        }
         // rings
-        x.strokeStyle = album.labelInk;
-        x.globalAlpha = 0.65;
+        x.strokeStyle = o.ring;
+        x.globalAlpha = 0.6;
         x.lineWidth = size * 0.006;
         x.beginPath();
         x.arc(m, m, size * 0.46, 0, 7);
         x.stroke();
-        x.globalAlpha = 0.35;
+        x.globalAlpha = 0.3;
         x.lineWidth = size * 0.003;
         x.beginPath();
         x.arc(m, m, size * 0.42, 0, 7);
@@ -1744,7 +1742,8 @@
         x.arc(m, m, size * 0.13, 0, 7);
         x.stroke();
         x.globalAlpha = 1;
-        x.fillStyle = album.labelInk;
+        // title + artist
+        x.fillStyle = o.ink;
         x.textAlign = "center";
         x.font = `700 ${size * 0.062}px Inter, sans-serif`;
         x.fillText(clip(album.title, 20).toUpperCase(), m, size * 0.3);
@@ -1771,7 +1770,66 @@
         x.font = `500 ${size * 0.03}px Inter, sans-serif`;
         x.fillText("33⅓ RPM · LONG PLAY", m, size * 0.66);
         x.fillText("SIDE A", m, size * 0.715);
-        // spindle hole
+        x.restore();
+      }
+
+      function makeLabel(album, size = 512) {
+        const c = cnv(size, size),
+          x = c.getContext("2d"),
+          m = size / 2;
+        const img = album.img;
+        const hasArt = img && img.complete && img.naturalWidth;
+
+        if (hasArt) {
+          // ── picture disc: the selected song's real cover art becomes the
+          //    record's centre label, cropped to the circle ──
+          x.save();
+          x.beginPath();
+          x.arc(m, m, m, 0, 7);
+          x.clip();
+          const scale = Math.max(
+            size / img.naturalWidth,
+            size / img.naturalHeight,
+          );
+          const dw = img.naturalWidth * scale,
+            dh = img.naturalHeight * scale;
+          x.drawImage(img, (size - dw) / 2, (size - dh) / 2, dw, dh);
+          // edge vignette so the label reads against the black vinyl
+          const vg = x.createRadialGradient(m, m, size * 0.14, m, m, m);
+          vg.addColorStop(0, "rgba(0,0,0,0)");
+          vg.addColorStop(0.7, "rgba(0,0,0,0)");
+          vg.addColorStop(1, "rgba(8,5,2,0.6)");
+          x.fillStyle = vg;
+          x.fillRect(0, 0, size, size);
+          // legibility scrim behind the title zone
+          const scrim = x.createLinearGradient(0, size * 0.2, 0, size * 0.42);
+          scrim.addColorStop(0, "rgba(0,0,0,0)");
+          scrim.addColorStop(0.5, "rgba(0,0,0,0.5)");
+          scrim.addColorStop(1, "rgba(0,0,0,0)");
+          x.fillStyle = scrim;
+          x.fillRect(0, size * 0.16, size, size * 0.34);
+          grain(x, 12, 1100);
+          x.restore();
+          labelFurniture(x, size, album, {
+            ring: "rgba(255,248,236,0.55)",
+            ink: "#fff8ec",
+            shadow: true,
+          });
+        } else {
+          // ── procedural paper label (demo records / art not yet loaded) ──
+          x.fillStyle = album.label;
+          x.beginPath();
+          x.arc(m, m, m, 0, 7);
+          x.fill();
+          grain(x, 16, 1800);
+          labelFurniture(x, size, album, {
+            ring: album.labelInk,
+            ink: album.labelInk,
+            shadow: false,
+          });
+        }
+
+        // spindle hole (both variants)
         x.globalCompositeOperation = "destination-out";
         x.beginPath();
         x.arc(m, m, size * 0.028, 0, 7);
@@ -4314,6 +4372,9 @@
             slot.cover = coverFromImage(slot, placeholder);
             if (slot.artworkUrl) {
               const img = new Image();
+              // CORS-clean so the cover can also texture the 3D disc without
+              // tainting the WebGL canvas (mzstatic serves ACAO: *).
+              img.crossOrigin = "anonymous";
               img.decoding = "async";
               img.onload = () => redrawCover(i);
               img.src = slot.artworkUrl;
