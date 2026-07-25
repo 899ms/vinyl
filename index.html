@@ -465,6 +465,56 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      .source-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 18px;
+        padding: 6px 13px 6px 11px;
+        border: 1px solid var(--hairline);
+        border-radius: 999px;
+        background: rgba(251, 245, 233, 0.55);
+        backdrop-filter: blur(4px);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-soft);
+        width: fit-content;
+        transition: opacity 0.4s ease;
+      }
+      .source-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 0 0 rgba(168, 118, 62, 0.5);
+      }
+      .source-badge[data-state="loading"] .source-dot {
+        animation: srcPulse 1.3s ease-in-out infinite;
+      }
+      .source-badge[data-state="live"] .source-dot {
+        background: #3f9d5a;
+        box-shadow: 0 0 8px 1px rgba(63, 157, 90, 0.55);
+      }
+      .source-badge[data-state="offline"] {
+        color: var(--ink-faint);
+      }
+      .source-badge[data-state="offline"] .source-dot {
+        background: var(--ink-faint);
+        box-shadow: none;
+      }
+      @keyframes srcPulse {
+        0%,
+        100% {
+          box-shadow: 0 0 0 0 rgba(168, 118, 62, 0.5);
+          opacity: 1;
+        }
+        50% {
+          box-shadow: 0 0 0 5px rgba(168, 118, 62, 0);
+          opacity: 0.6;
+        }
+      }
       .transport {
         display: flex;
         align-items: center;
@@ -958,6 +1008,10 @@
       <div class="hero-copy">
         <div class="eyebrow">3D&nbsp;VINYL&nbsp;PLAYER</div>
         <h1 class="hero-title">Timeless sound.<br />Made real.</h1>
+        <div class="source-badge" id="srcBadge" data-state="loading">
+          <span class="source-dot" aria-hidden="true"></span>
+          <span id="srcText">Loading classics…</span>
+        </div>
       </div>
 
       <div class="speed" role="group" aria-label="Turntable speed">
@@ -1629,6 +1683,40 @@
         return c;
       }
 
+      /* Real artwork (from the trending feed) drawn into the same square as the
+         procedural covers: object-fit "cover", plus a warm vignette and film
+         grain so streamed album art sits inside the analog aesthetic. While the
+         remote image is still loading we fall back to the gorgeous procedural
+         placeholder so nothing ever pops in empty. */
+      function coverFromImage(album, placeholder) {
+        return function (x, s) {
+          const img = album.img;
+          if (img && img.complete && img.naturalWidth) {
+            const scale = Math.max(s / img.naturalWidth, s / img.naturalHeight);
+            const dw = img.naturalWidth * scale,
+              dh = img.naturalHeight * scale;
+            x.drawImage(img, (s - dw) / 2, (s - dh) / 2, dw, dh);
+            const v = x.createRadialGradient(
+              s / 2,
+              s / 2,
+              s * 0.2,
+              s / 2,
+              s / 2,
+              s * 0.72,
+            );
+            v.addColorStop(0, "rgba(0,0,0,0)");
+            v.addColorStop(1, "rgba(20,12,4,0.34)");
+            x.fillStyle = v;
+            x.fillRect(0, 0, s, s);
+            grain(x, 14, 1400);
+          } else {
+            placeholder(x, s);
+          }
+        };
+      }
+      const clip = (s, n) =>
+        s && s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s;
+
       /* — record center label (canvas → texture) — */
       function makeLabel(album, size = 512) {
         const c = cnv(size, size),
@@ -1659,9 +1747,9 @@
         x.fillStyle = album.labelInk;
         x.textAlign = "center";
         x.font = `700 ${size * 0.062}px Inter, sans-serif`;
-        x.fillText(album.title.toUpperCase(), m, size * 0.3);
+        x.fillText(clip(album.title, 20).toUpperCase(), m, size * 0.3);
         x.font = `500 ${size * 0.04}px Inter, sans-serif`;
-        x.fillText(album.artist.toUpperCase(), m, size * 0.365);
+        x.fillText(clip(album.artist, 24).toUpperCase(), m, size * 0.365);
         // arc text bottom: STEREO
         x.save();
         x.translate(m, m);
@@ -2981,7 +3069,15 @@
           crackleGain,
           musicGain;
         let crackleSrc = null;
-        const S = { volume: 0.75, tone: 0.5, speedFactor: 1, playing: false };
+        let mediaEl = null,
+          mediaSrc = null;
+        const S = {
+          volume: 0.75,
+          tone: 0.5,
+          speedFactor: 1,
+          playing: false,
+          media: false,
+        };
 
         function ensure() {
           if (ctx) return ctx;
@@ -3027,8 +3123,29 @@
           bp.connect(crackleGain);
           crackleGain.connect(master);
           crackleSrc.start();
+          // real-audio path: an <audio> element for streamed tracks (e.g. the
+          // Audius trending feed), routed through the SAME warm chain
+          // (musicGain → tilt-EQ → compressor → master) so tone, volume and
+          // the vinyl crackle bed all apply to real songs exactly as they do
+          // to the synthesized records. window.Audio dodges the module-scoped
+          // `Audio` binding (this very IIFE), which is still in its TDZ here.
+          mediaEl = new window.Audio();
+          mediaEl.crossOrigin = "anonymous";
+          mediaEl.preload = "auto";
+          mediaSrc = ctx.createMediaElementSource(mediaEl);
+          mediaSrc.connect(musicGain);
           applyTone(S.tone);
           return ctx;
+        }
+        function seekMedia(sec) {
+          if (!mediaEl) return;
+          const apply = () => {
+            try {
+              mediaEl.currentTime = Math.max(0, sec || 0);
+            } catch (e) {}
+          };
+          if (mediaEl.readyState >= 1) apply();
+          else mediaEl.addEventListener("loadedmetadata", apply, { once: true });
         }
         const now = () => (ctx ? ctx.currentTime : 0);
 
@@ -3416,27 +3533,49 @@
         }
         return {
           ensure,
-          play(album) {
+          play(album, startAt = 0) {
             ensure();
             if (ctx.state === "suspended") ctx.resume();
-            seq.album = album;
-            seq.step = 0;
-            seq.nextT = now() + 0.06;
-            S.playing = true;
-            clearInterval(seq.timer);
-            seq.timer = setInterval(pump, 30);
             musicGain.gain.cancelScheduledValues(now());
             musicGain.gain.setTargetAtTime(1, now(), 0.5);
             crackleGain.gain.setTargetAtTime(0.55, now(), 0.4);
+            if (album.streamUrl) {
+              // real streamed track → drive the <audio> element, silence the
+              // synth sequencer.
+              S.media = true;
+              clearInterval(seq.timer);
+              seq.album = null;
+              if (mediaEl.src !== album.streamUrl) mediaEl.src = album.streamUrl;
+              mediaEl.playbackRate = S.speedFactor;
+              seekMedia(startAt);
+              mediaEl.play().catch(() => {});
+            } else {
+              // procedural fallback: generative synth composition.
+              S.media = false;
+              if (mediaEl) mediaEl.pause();
+              seq.album = album;
+              seq.step = 0;
+              seq.nextT = now() + 0.06;
+              clearInterval(seq.timer);
+              seq.timer = setInterval(pump, 30);
+            }
+            S.playing = true;
           },
           stop(fast = false) {
             S.playing = false;
             clearInterval(seq.timer);
+            if (mediaEl) mediaEl.pause();
             if (!ctx) return;
             const k = fast ? 0.12 : 0.5;
             musicGain.gain.setTargetAtTime(0, now(), k);
             crackleGain.gain.setTargetAtTime(0, now(), k * 1.4);
           },
+          seek(sec) {
+            if (S.media) seekMedia(sec);
+          },
+          mediaActive: () => S.media && S.playing,
+          mediaTime: () => (mediaEl ? mediaEl.currentTime : 0),
+          mediaEnded: () => !!(mediaEl && mediaEl.ended),
           setVolume(v) {
             S.volume = v;
             if (ctx) master.gain.setTargetAtTime(v * v, now(), 0.05);
@@ -3447,8 +3586,10 @@
           },
           setSpeed(f) {
             S.speedFactor = f;
+            if (mediaEl) mediaEl.playbackRate = f;
           },
           seekRestart() {
+            if (S.media) return; // media seeking is handled via seek()
             if (S.playing && seq.album) {
               seq.step = 0;
               seq.nextT = now() + 0.05;
@@ -3508,7 +3649,7 @@
         const tl = gsap.timeline({
           onComplete() {
             T.state = "playing";
-            Audio.play(album());
+            Audio.play(album(), T.time);
           },
         });
         armTL.tl = tl;
@@ -3848,9 +3989,10 @@
           .querySelectorAll(".album")
           .forEach((el) => el.classList.toggle("active", el.dataset.id === id));
       }
-      /* build the carousel */
-      {
+      /* build the carousel (re-run when the trending feed lands) */
+      function buildCarousel() {
         const rail = document.getElementById("carousel");
+        rail.innerHTML = "";
         ALBUMS.forEach((a, i) => {
           const b = document.createElement("button");
           b.className = "album";
@@ -3863,6 +4005,7 @@
           disc.className = "album-disc";
           const cover = document.createElement("div");
           cover.className = "album-cover";
+          cover.dataset.idx = i;
           cover.appendChild(makeCover(a, 420));
           vis.append(disc, cover);
           const name = document.createElement("div");
@@ -3875,6 +4018,10 @@
           b.addEventListener("click", () => loadAlbum(i, true));
           rail.appendChild(b);
         });
+      }
+      buildCarousel();
+      {
+        const rail = document.getElementById("carousel");
         const step = () => rail.clientWidth * 0.7;
         document
           .getElementById("carPrev")
@@ -3911,6 +4058,7 @@
         const p = THREE.MathUtils.clamp((clientX - r.left) / r.width, 0, 1);
         T.time = p * album().dur;
         Audio.seekRestart();
+        Audio.seek(T.time);
         document.getElementById("seekFill").style.width = p * 100 + "%";
         document.getElementById("seekDot").style.left = p * 100 + "%";
       }
@@ -3931,6 +4079,7 @@
         if (e.key === "ArrowLeft") {
           T.time = Math.max(T.time - 10, 0);
         }
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") Audio.seek(T.time);
       });
 
       /* volume slider ↔ knob sync */
@@ -3985,8 +4134,15 @@
 
         /* track clock + stylus tracking */
         if (T.state === "playing") {
-          T.time += dt * (T.rpm / (100 / 3));
-          if (T.time >= album().dur) {
+          // real streamed tracks: the <audio> element is the master clock, so
+          // the tonearm and progress bar track the actual playhead (and honor
+          // buffering pauses). Synth records integrate against motor speed.
+          if (Audio.mediaActive()) T.time = Audio.mediaTime();
+          else T.time += dt * (T.rpm / (100 / 3));
+          if (
+            (Audio.mediaActive() && Audio.mediaEnded()) ||
+            T.time >= album().dur
+          ) {
             loadAlbum(T.albumIdx + 1, true);
           } else {
             armYaw.rotation.y = yawForProgress(T.time / album().dur);
@@ -4051,6 +4207,139 @@
       addEventListener("resize", resize);
 
       /* ══════════════════════════════════════════════════════════════
+   9.5 · LIVE LIBRARY — all-time famous English songs (iTunes Search API)
+   A curated set of iconic records is resolved through Apple's free, open,
+   CORS-friendly iTunes Search API into real 30-second previews + real album
+   artwork of the actual famous recordings (full-length streaming of
+   copyrighted hits isn't available for free). Each match overwrites one of
+   the six built-in records in place, so the whole scene keeps working — and
+   if the network is down, the procedural demo simply stays. No API key.
+   ══════════════════════════════════════════════════════════════ */
+      // curated icons — spanning the decades, instantly recognizable. The
+      // artist is included to disambiguate the iTunes search from live cuts,
+      // karaoke and covers.
+      const FAMOUS = [
+        { title: "Believer", artist: "Imagine Dragons" },
+        { title: "Thunder", artist: "Imagine Dragons" },
+        { title: "Radioactive", artist: "Imagine Dragons" },
+        { title: "Demons", artist: "Imagine Dragons" },
+        { title: "Natural", artist: "Imagine Dragons" },
+        { title: "Cruel Summer", artist: "Taylor Swift" },
+      ];
+
+      function setSource(text, state) {
+        const badge = document.getElementById("srcBadge");
+        if (!badge) return;
+        badge.dataset.state = state;
+        document.getElementById("srcText").textContent = text;
+      }
+
+      function redrawCover(i) {
+        const cont = document.querySelector(`.album-cover[data-idx="${i}"]`);
+        if (cont) {
+          cont.innerHTML = "";
+          cont.appendChild(makeCover(ALBUMS[i], 420));
+        }
+        if (i === T.albumIdx) {
+          updateNowPlaying(ALBUMS[i]);
+          labelMat.map = ctex(makeLabel(ALBUMS[i]));
+          labelMat.needsUpdate = true;
+        }
+      }
+
+      // score iTunes results so we land the canonical studio recording rather
+      // than a live take, remix, karaoke or tribute version.
+      function pickBestMatch(results, want) {
+        const T0 = want.title.toLowerCase(),
+          A0 = want.artist.toLowerCase();
+        const bad =
+          /karaoke|tribute|cover|instrumental|as made famous|originally performed|made popular/i;
+        const cand = (results || []).filter(
+          (r) =>
+            r.previewUrl &&
+            !bad.test(`${r.trackName} ${r.artistName} ${r.collectionName || ""}`),
+        );
+        const score = (r) => {
+          let s = 0;
+          const an = r.artistName.toLowerCase(),
+            tn = r.trackName.toLowerCase();
+          if (an.includes(A0) || A0.includes(an)) s += 5;
+          if (tn === T0) s += 5;
+          else if (tn.startsWith(T0)) s += 3;
+          else if (tn.includes(T0)) s += 1;
+          if (/\b(live|remix|re-recorded|edit|version|remaster)/i.test(tn))
+            s -= 2;
+          return s;
+        };
+        cand.sort((a, b) => score(b) - score(a));
+        return cand[0] || null;
+      }
+
+      async function loadFamous() {
+        try {
+          // 1 · resolve every curated song through the iTunes Search API (in
+          //     parallel), keeping the best studio match for each.
+          const matches = await Promise.all(
+            FAMOUS.map((song) =>
+              fetch(
+                `https://itunes.apple.com/search?term=${encodeURIComponent(
+                  song.artist + " " + song.title,
+                )}&entity=song&limit=10&country=US`,
+              )
+                .then((r) => r.json())
+                .then((j) => pickBestMatch(j.results, song))
+                .catch(() => null),
+            ),
+          );
+          if (!matches.some(Boolean)) throw new Error("no matches resolved");
+
+          // 2 · fold each match into a record slot (keep the slot's warm label
+          //     colours; swap in the real title / artist / artwork / preview).
+          let got = 0;
+          for (let i = 0; i < ALBUMS.length && i < matches.length; i++) {
+            const r = matches[i];
+            if (!r) continue;
+            const slot = ALBUMS[i],
+              placeholder = slot.cover;
+            slot.id = "it-" + r.trackId;
+            slot.title = r.trackName;
+            slot.artist = r.artistName;
+            slot.dur = 30; // free previews are ~30 seconds
+            slot.streamUrl = r.previewUrl;
+            slot.artworkUrl = (r.artworkUrl100 || "").replace(
+              "100x100bb",
+              "600x600bb",
+            );
+            slot.img = null;
+            slot.cover = coverFromImage(slot, placeholder);
+            if (slot.artworkUrl) {
+              const img = new Image();
+              img.decoding = "async";
+              img.onload = () => redrawCover(i);
+              img.src = slot.artworkUrl;
+              slot.img = img;
+            }
+            got++;
+          }
+          if (!got) throw new Error("no matches mapped");
+
+          // 3 · reflect the fresh library everywhere
+          buildCarousel();
+          updateNowPlaying(album());
+          markActiveCard(album().id);
+          labelMat.map = ctex(makeLabel(album()));
+          labelMat.needsUpdate = true;
+          setSource("Classic hits · iTunes", "live");
+        } catch (err) {
+          console.warn(
+            "[Analogic] iTunes library unavailable — using built-in demo records.",
+            err,
+          );
+          setSource("Demo · offline", "offline");
+        }
+      }
+
+      /* ══════════════════════════════════════════════════════════════
    10 · BOOT
    ══════════════════════════════════════════════════════════════ */
       labelMat.map = ctex(makeLabel(album()));
@@ -4065,7 +4354,8 @@
         labelMat.map = ctex(makeLabel(album()));
         labelMat.needsUpdate = true;
         updateNowPlaying(album());
-        document.querySelectorAll(".album-cover").forEach((el, i) => {
+        document.querySelectorAll(".album-cover").forEach((el) => {
+          const i = +el.dataset.idx || 0;
           el.innerHTML = "";
           el.appendChild(makeCover(ALBUMS[i], 420));
         });
@@ -4074,6 +4364,9 @@
         () => document.getElementById("loader").classList.add("done"),
         650,
       );
+
+      // fetch the famous-classics library (non-blocking; demo shows instantly)
+      loadFamous();
     </script>
   </body>
 </html>
